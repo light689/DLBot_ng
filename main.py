@@ -305,7 +305,7 @@ async def join_channel(nick, password, channel, ws_link):
                     received_messages.append((time.time(), message.get("text", "")))
                     
                     # 检查是否达到了100条消息
-                    if message_count >= 100:
+                    if message_count >= 30:
                         # 筛选出30秒内的消息
                         eligible_messages = [
                             msg for timestamp, msg in received_messages
