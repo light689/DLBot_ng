@@ -41,12 +41,18 @@ def get_whoami(trip):
 whisper_history = {}
 websocket = None
 
+# 新增变量和数据结构用于新功能
+message_count = 0  # 记录自上次发送消息后收到的chat消息数量
+received_messages = []  # 存储接收到的chat消息（包含时间戳）
+last_sent_time = 0  # 记录上次发送消息的时间
+
 # 初始化日志状态文件
 if not os.path.exists("log_status.txt"):
     with open("log_status.txt", "w", encoding="utf-8") as status_file:
         status_file.write("0")
 
 def log_message(type, message):
+    global message_count, received_messages, last_sent_time
     if not os.path.exists("log_status.txt"):
         with open("log_status.txt", "w", encoding="utf-8") as status_file:
             status_file.write("0")
@@ -88,16 +94,6 @@ def log_message(type, message):
             # 如果消息不是有效的JSON，忽略或记录错误
             pass
 
-# 新增变量和数据结构用于新功能
-message_count = 0  # 记录自上次发送消息后收到的chat消息数量
-received_messages = []  # 存储接收到的chat消息
-last_sent_time = 0  # 记录上次发送消息的时间
-
-# 初始化日志状态文件
-if not os.path.exists("log_status.txt"):
-    with open("log_status.txt", "w", encoding="utf-8") as status_file:
-        status_file.write("0")
-
 async def join_channel(nick, password, channel, ws_link):
     global websocket, message_count, received_messages, last_sent_time
     uri = ws_link
@@ -114,9 +110,8 @@ async def join_channel(nick, password, channel, ws_link):
             await asyncio.sleep(10)
 
     async def handle_messages(ws):
-        nonlocal current_nick, full_nick  # 声明 nonlocal 以便修改外部变量
-        nonlocal pause_until  # 声明 nonlocal，以便在接收到特定警告时修改 pause_until
-        nonlocal message_count, received_messages, last_sent_time  # 声明用于新功能的变量
+        global current_nick, full_nick, pause_until
+        global message_count, received_messages, last_sent_time
         send_color_task = asyncio.create_task(send_color_message(ws))
         initial_join_time = time.time()
         while True:
@@ -302,32 +297,36 @@ async def join_channel(nick, password, channel, ws_link):
                         error_message = {"cmd": "chat", "text": "访问被拒绝", "customId": "0"}
                         await ws.send(json.dumps(error_message))
                         log_message("发送消息", json.dumps(error_message))
-
+                
                 # 新增功能处理：记录chat消息并在条件满足时发送随机消息
                 if message.get("cmd") == "chat":
                     message_count += 1
-                    # 记录收到的消息
-                    received_messages.append(message.get("text", ""))
+                    # 记录收到的消息及其时间戳
+                    received_messages.append((time.time(), message.get("text", "")))
                     
                     # 检查是否达到了100条消息
                     if message_count >= 100:
-                        # 在30秒内随机选择一条合格的消息
-                        eligible_messages = [msg for msg in received_messages if "\n" not in msg and len(msg) <= 500]
+                        # 筛选出30秒内的消息
+                        eligible_messages = [
+                            msg for timestamp, msg in received_messages
+                            if last_sent_time <= timestamp <= last_sent_time + 30 and "\n" not in msg and len(msg) <= 500
+                        ]
+                        
                         if eligible_messages:
                             random_message = random.choice(eligible_messages)
                             # 在前面加上空格
                             send_text = f" {random_message}"
                             await ws.send(json.dumps({"cmd": "chat", "text": send_text, "customId": "0"}))
                             log_message("发送消息", json.dumps({"cmd": "chat", "text": send_text, "customId": "0"}))
-                            # 重置计数和消息列表
-                            message_count = 0
-                            received_messages = []
+                            # 更新最后发送时间
                             last_sent_time = time.time()
                         else:
-                            # 如果没有符合条件的消息，重置计数和消息列表
-                            message_count = 0
-                            received_messages = []
-                    
+                            log_message("系统日志", "没有符合条件的消息可发送。")
+                        
+                        # 重置计数和消息列表
+                        message_count = 0
+                        received_messages = []
+            
             except websockets.ConnectionClosed:
                 log_message("系统日志", "连接中断，尝试重新连接...")
                 send_color_task.cancel()
@@ -362,6 +361,8 @@ async def join_channel(nick, password, channel, ws_link):
                 join_message = {"cmd": "join", "channel": channel, "nick": full_nick}  # 使用包含密码的完整昵称
                 await ws.send(json.dumps(join_message))
                 log_message("系统日志", f"Joined channel {channel} as {current_nick}")
+                # 更新最后发送时间为当前时间
+                last_sent_time = time.time()
                 await handle_messages(ws)
         except (websockets.ConnectionClosed, websockets.InvalidHandshake, websockets.InvalidURI, OSError) as e:
             log_message("系统日志", f"连接错误: {e}, 10秒后重试...")
@@ -487,12 +488,14 @@ async def handle_post(request):
         return web.json_response({"status": "error", "message": "WebSocket connection not established"}, status=500)
 
 async def send_message(message):
-    global websocket
+    global websocket, last_sent_time
     if websocket:
         # 处理换行符
         message = message.replace('\\n', '\n')
         chat_message = {"cmd": "chat", "text": message, "customId": "0"}
         await websocket.send(json.dumps(chat_message))
+        # 更新最后发送时间
+        last_sent_time = time.time()
         return True
     return False
 
