@@ -92,7 +92,7 @@ async def join_channel(nick, password, channel, ws_link):
     global websocket
     uri = ws_link
     current_nick = nick  # 使用 current_nick 代替 nick 进行修改
-    full_nick = f"{current_nick}#{password}"
+    full_nick = f"{current_nick}#{password}"  # 包含密码的完整昵称
     pause_until = None  # 新增变量，用于记录需要暂停到的时间
 
     async def send_color_message(ws):
@@ -225,7 +225,7 @@ async def join_channel(nick, password, channel, ws_link):
                             log_message("发送消息", json.dumps(chat_message))
                 
                 if message.get("channel") != true_channel and time.time() - initial_join_time > 10:
-                    log_message("系统日志", "Detected kick, attempting to rejoin...")
+                    log_message("系统日志", "检测到被踢出，尝试重新加入...")
                     send_color_task.cancel()
                     try:
                         await send_color_task
@@ -280,7 +280,7 @@ async def join_channel(nick, password, channel, ws_link):
                 if message.get("cmd") == "chat" and message.get("text") == "$reload":
                     trip = message.get("trip")
                     if trip in trustedusers:
-                        log_message("系统日志", "Trusted user initiated reload, reloading...")
+                        log_message("系统日志", "受信任用户发起重载，正在重载...")
                         try:
                             os.execl(sys.executable, sys.executable, *sys.argv)
                         except Exception as e:
@@ -288,12 +288,12 @@ async def join_channel(nick, password, channel, ws_link):
                             await ws.send(json.dumps(error_message))
                             log_message("发送消息", json.dumps(error_message))
                     else:
-                        error_message = {"cmd": "chat", "text": "Access denied", "customId": "0"}
+                        error_message = {"cmd": "chat", "text": "访问被拒绝", "customId": "0"}
                         await ws.send(json.dumps(error_message))
                         log_message("发送消息", json.dumps(error_message))
 
             except websockets.ConnectionClosed:
-                log_message("系统日志", "Connection lost, attempting to reconnect...")
+                log_message("系统日志", "连接中断，尝试重新连接...")
                 send_color_task.cancel()
                 try:
                     await send_color_task
@@ -323,13 +323,13 @@ async def join_channel(nick, password, channel, ws_link):
         try:
             async with websockets.connect(uri) as ws:
                 websocket = ws  # 更新全局的 websocket 变量
-                join_message = {"cmd": "join", "channel": channel, "nick": current_nick}
+                join_message = {"cmd": "join", "channel": channel, "nick": full_nick}  # 使用包含密码的完整昵称
                 await ws.send(json.dumps(join_message))
                 log_message("系统日志", f"Joined channel {channel} as {current_nick}")
                 await handle_messages(ws)
         except (websockets.ConnectionClosed, websockets.InvalidHandshake, websockets.InvalidURI, OSError) as e:
-            log_message("系统日志", f"Connection error: {e}, retrying in 10 seconds...")
-        log_message("系统日志", f"Disconnected. retrying in 10 seconds...")
+            log_message("系统日志", f"连接错误: {e}, 10秒后重试...")
+        log_message("系统日志", f"断开连接。10秒后重试...")
         await asyncio.sleep(10)
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -491,4 +491,4 @@ if __name__ == '__main__':
 
         asyncio.run(main())
     else:
-        print("Error: 'user.txt' file not found. Please ensure the file exists.")
+        print("错误：未找到 'user.txt' 文件。请确保该文件存在。")
