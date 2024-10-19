@@ -41,17 +41,12 @@ def get_whoami(trip):
 whisper_history = {}
 websocket = None
 
-# 用于存储最近60秒的聊天消息
-recent_messages = []
-last_bot_message_time = 0  # 上一次bot发送消息的时间
-
 # 初始化日志状态文件
 if not os.path.exists("log_status.txt"):
     with open("log_status.txt", "w", encoding="utf-8") as status_file:
         status_file.write("0")
 
 def log_message(type, message):
-    global last_bot_message_time
     if not os.path.exists("log_status.txt"):
         with open("log_status.txt", "w", encoding="utf-8") as status_file:
             status_file.write("0")
@@ -74,36 +69,40 @@ def log_message(type, message):
         log_entry = f"{type}：{message}\n"
         log_file.write(log_entry)
         print(log_entry, end="")
-
+    
     if type == "收到消息":
         try:
             message_json = json.loads(message)
             if message_json.get("cmd") == "chat":
                 msg_entry = f"[{message_json.get('trip', '')}]{message_json.get('nick', '')}：{message_json.get('text', '')}\n"
-                # 记录最近的聊天消息
-                current_time = time.time()
-                recent_messages.append((current_time, message_json.get('text', '')))
-                # 清理超过60秒的消息
-                while recent_messages and recent_messages[0][0] < current_time - 60:
-                    recent_messages.pop(0)
             elif message_json.get("cmd") == "info":
                 msg_entry = f"系统提示：{message_json.get('text', '')}\n"
             elif message_json.get("cmd") == "warn":
                 msg_entry = f"系统警告：{message_json.get('text', '')}\n"
             else:
                 return
-
+            
             with open("msg.log", "a", encoding="utf-8") as msg_file:
                 msg_file.write(msg_entry)
         except json.JSONDecodeError:
             # 如果消息不是有效的JSON，忽略或记录错误
             pass
 
+# 新增变量和数据结构用于新功能
+message_count = 0  # 记录自上次发送消息后收到的chat消息数量
+received_messages = []  # 存储接收到的chat消息
+last_sent_time = 0  # 记录上次发送消息的时间
+
+# 初始化日志状态文件
+if not os.path.exists("log_status.txt"):
+    with open("log_status.txt", "w", encoding="utf-8") as status_file:
+        status_file.write("0")
+
 async def join_channel(nick, password, channel, ws_link):
-    global websocket, last_bot_message_time
+    global websocket, message_count, received_messages, last_sent_time
     uri = ws_link
     current_nick = nick  # 使用 current_nick 代替 nick 进行修改
-    full_nick = f"{current_nick}#{password}"
+    full_nick = f"{current_nick}#{password}"  # 包含密码的完整昵称
     pause_until = None  # 新增变量，用于记录需要暂停到的时间
 
     async def send_color_message(ws):
@@ -114,36 +113,18 @@ async def join_channel(nick, password, channel, ws_link):
             log_message("发送消息", json.dumps(color_message))
             await asyncio.sleep(10)
 
-    async def send_random_repeat_message(ws):
-        global recent_messages, last_bot_message_time
-        while True:
-            await asyncio.sleep(60)  # 每隔60秒执行一次
-            current_time = time.time()
-            # 检查上一次bot发送消息的时间
-            if current_time - last_bot_message_time >= 60:
-                # 获取过去60秒内的消息
-                messages_to_consider = [msg for timestamp, msg in recent_messages if current_time - timestamp <= 60]
-                # 过滤掉包含换行符或长度大于500的消息
-                filtered_messages = [msg for msg in messages_to_consider if '\n' not in msg and len(msg) <= 500]
-                if filtered_messages:
-                    random_msg = random.choice(filtered_messages)
-                    repeat_message = {"cmd": "chat", "text": f" {random_msg}", "customId": "0"}
-                    await ws.send(json.dumps(repeat_message))
-                    log_message("发送消息", json.dumps(repeat_message))
-                    last_bot_message_time = current_time  # 更新bot发送消息的时间
-
     async def handle_messages(ws):
         nonlocal current_nick, full_nick  # 声明 nonlocal 以便修改外部变量
         nonlocal pause_until  # 声明 nonlocal，以便在接收到特定警告时修改 pause_until
+        nonlocal message_count, received_messages, last_sent_time  # 声明用于新功能的变量
         send_color_task = asyncio.create_task(send_color_message(ws))
-        send_repeat_task = asyncio.create_task(send_random_repeat_message(ws))
         initial_join_time = time.time()
         while True:
             try:
                 response = await ws.recv()
                 log_message("收到消息", response)
                 message = json.loads(response)
-
+                
                 if message.get("cmd") == "warn":
                     warn_text = message.get("text", "")
                     # 检查特定的警告信息
@@ -152,13 +133,8 @@ async def join_channel(nick, password, channel, ws_link):
                         pause_until = time.time() + 60  # 设置暂停时间
                         await ws.close()
                         send_color_task.cancel()
-                        send_repeat_task.cancel()
                         try:
                             await send_color_task
-                        except asyncio.CancelledError:
-                            pass
-                        try:
-                            await send_repeat_task
                         except asyncio.CancelledError:
                             pass
                         break  # 退出当前循环，等待重新连接
@@ -168,13 +144,8 @@ async def join_channel(nick, password, channel, ws_link):
                         full_nick = f"{current_nick}#{password}"
                         await ws.close()
                         send_color_task.cancel()
-                        send_repeat_task.cancel()
                         try:
                             await send_color_task
-                        except asyncio.CancelledError:
-                            pass
-                        try:
-                            await send_repeat_task
                         except asyncio.CancelledError:
                             pass
                         break  # 退出当前循环，等待重新连接
@@ -192,7 +163,7 @@ async def join_channel(nick, password, channel, ws_link):
                     from_user = message.get("from")
                     trip = message.get("trip", "")
                     whisper_content = message.get("text", "")
-
+                    
                     # 忽略以"You whispered to"开头的消息
                     if not whisper_content.startswith("You whispered to"):
                         # 记录私信历史
@@ -200,10 +171,10 @@ async def join_channel(nick, password, channel, ws_link):
                         if from_user not in whisper_history:
                             whisper_history[from_user] = []
                         whisper_history[from_user].append((current_time, whisper_content))
-
+                        
                         # 检查最近1秒内的私信
                         recent_whispers = [w for w in whisper_history[from_user] if current_time - w[0] <= 1]
-
+                        
                         if len(recent_whispers) >= 3 and all(w[1] == recent_whispers[0][1] for w in recent_whispers):
                             # 发送警告消息
                             warning_message = {
@@ -213,13 +184,13 @@ async def join_channel(nick, password, channel, ws_link):
                             }
                             await ws.send(json.dumps(warning_message))
                             log_message("发送消息", json.dumps(warning_message))
-
+                        
                         # 清理旧的私信记录
                         whisper_history[from_user] = [w for w in whisper_history[from_user] if current_time - w[0] <= 10]
-
+                        
                         # 固定的私信回复
                         reply = ".\n本bot目前不支持私信命令使用。"
-
+                        
                         # 发送私信回复
                         whisper_reply = {
                             "cmd": "whisper",
@@ -228,6 +199,7 @@ async def join_channel(nick, password, channel, ws_link):
                         }
                         # await ws.send(json.dumps(whisper_reply))
                         # log_message("发送私信", json.dumps(whisper_reply))
+
 
                 if message.get("cmd") == "warn" and "Nickname taken" in message.get("text", ""):
                     log_message("系统日志", "Nickname taken, modifying nickname and retrying...")
@@ -242,7 +214,7 @@ async def join_channel(nick, password, channel, ws_link):
                     current_nick += "_"
                     full_nick = f"{current_nick}#{password}"
                     break
-
+                
                 if message.get("cmd") == "onlineSet":
                     startup_message = {"cmd": "chat", "text": "DLBot检测到异常退出，并且顺利重启。 使用`$help`查看帮助。", "customId": "0"}
                     await ws.send(json.dumps(startup_message))
@@ -251,6 +223,7 @@ async def join_channel(nick, password, channel, ws_link):
                     cnick_message = {"cmd": "changenick", "nick": current_nick, "customId": "0"}
                     await ws.send(json.dumps(cnick_message))
                     log_message("系统提示", f"已修改昵称为 {current_nick}")
+
 
                 if message.get("cmd") == "info" and message.get("type") == "whisper":
                     trip = message.get("trip")
@@ -261,21 +234,16 @@ async def join_channel(nick, password, channel, ws_link):
                             chat_message = {"cmd": "chat", "text": msg, "customId": "0"}
                             await ws.send(json.dumps(chat_message))
                             log_message("发送消息", json.dumps(chat_message))
-
+                
                 if message.get("channel") != true_channel and time.time() - initial_join_time > 10:
-                    log_message("系统日志", "Detected kick, attempting to rejoin...")
+                    log_message("系统日志", "检测到被踢出，尝试重新加入...")
                     send_color_task.cancel()
-                    send_repeat_task.cancel()
                     try:
                         await send_color_task
                     except asyncio.CancelledError:
                         pass
-                    try:
-                        await send_repeat_task
-                    except asyncio.CancelledError:
-                        pass
                     break
-
+                
                 if message.get("cmd") == "chat" and message.get("text", "").startswith("$chat "):
                     trip = message.get("trip")
                     if trip in trustedusers:
@@ -283,7 +251,7 @@ async def join_channel(nick, password, channel, ws_link):
                         whisper_message = {"cmd": "chat", "text": msg, "customId": "0"}
                         await ws.send(json.dumps(whisper_message))
                         log_message("发送消息", json.dumps(whisper_message))
-
+                
                 if message.get("cmd") == "chat" and message.get("text", "").startswith("$whoami "):
                     trip = message.get("trip")
                     nick = message.get("nick", "Unknown")
@@ -323,7 +291,7 @@ async def join_channel(nick, password, channel, ws_link):
                 if message.get("cmd") == "chat" and message.get("text") == "$reload":
                     trip = message.get("trip")
                     if trip in trustedusers:
-                        log_message("系统日志", "Trusted user initiated reload, reloading...")
+                        log_message("系统日志", "受信任用户发起重载，正在重载...")
                         try:
                             os.execl(sys.executable, sys.executable, *sys.argv)
                         except Exception as e:
@@ -331,20 +299,40 @@ async def join_channel(nick, password, channel, ws_link):
                             await ws.send(json.dumps(error_message))
                             log_message("发送消息", json.dumps(error_message))
                     else:
-                        error_message = {"cmd": "chat", "text": "Access denied", "customId": "0"}
+                        error_message = {"cmd": "chat", "text": "访问被拒绝", "customId": "0"}
                         await ws.send(json.dumps(error_message))
                         log_message("发送消息", json.dumps(error_message))
 
+                # 新增功能处理：记录chat消息并在条件满足时发送随机消息
+                if message.get("cmd") == "chat":
+                    message_count += 1
+                    # 记录收到的消息
+                    received_messages.append(message.get("text", ""))
+                    
+                    # 检查是否达到了100条消息
+                    if message_count >= 100:
+                        # 在30秒内随机选择一条合格的消息
+                        eligible_messages = [msg for msg in received_messages if "\n" not in msg and len(msg) <= 500]
+                        if eligible_messages:
+                            random_message = random.choice(eligible_messages)
+                            # 在前面加上空格
+                            send_text = f" {random_message}"
+                            await ws.send(json.dumps({"cmd": "chat", "text": send_text, "customId": "0"}))
+                            log_message("发送消息", json.dumps({"cmd": "chat", "text": send_text, "customId": "0"}))
+                            # 重置计数和消息列表
+                            message_count = 0
+                            received_messages = []
+                            last_sent_time = time.time()
+                        else:
+                            # 如果没有符合条件的消息，重置计数和消息列表
+                            message_count = 0
+                            received_messages = []
+                    
             except websockets.ConnectionClosed:
-                log_message("系统日志", "Connection lost, attempting to reconnect...")
+                log_message("系统日志", "连接中断，尝试重新连接...")
                 send_color_task.cancel()
-                send_repeat_task.cancel()
                 try:
                     await send_color_task
-                except asyncio.CancelledError:
-                    pass
-                try:
-                    await send_repeat_task
                 except asyncio.CancelledError:
                     pass
                 break
@@ -371,13 +359,13 @@ async def join_channel(nick, password, channel, ws_link):
         try:
             async with websockets.connect(uri) as ws:
                 websocket = ws  # 更新全局的 websocket 变量
-                join_message = {"cmd": "join", "channel": channel, "nick": current_nick}
+                join_message = {"cmd": "join", "channel": channel, "nick": full_nick}  # 使用包含密码的完整昵称
                 await ws.send(json.dumps(join_message))
                 log_message("系统日志", f"Joined channel {channel} as {current_nick}")
                 await handle_messages(ws)
         except (websockets.ConnectionClosed, websockets.InvalidHandshake, websockets.InvalidURI, OSError) as e:
-            log_message("系统日志", f"Connection error: {e}, retrying in 10 seconds...")
-        log_message("系统日志", f"Disconnected. retrying in 10 seconds...")
+            log_message("系统日志", f"连接错误: {e}, 10秒后重试...")
+        log_message("系统日志", f"断开连接。10秒后重试...")
         await asyncio.sleep(10)
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -431,7 +419,7 @@ async def handle_get_recent_messages(request):
     except Exception as e:
         log_message("系统日志", f"读取 msg.log 时发生错误: {str(e)}")
         content = f"错误: {str(e)}"
-
+    
     return web.Response(text=content, content_type='text/plain')
 
 async def start_server():
@@ -477,7 +465,7 @@ async def handle_chat(request):
         decoded_message = decoded_message.replace('\\n', '\n')
     else:
         decoded_message = ""
-
+    
     global websocket
     if websocket:
         chat_message = {"cmd": "chat", "text": decoded_message, "customId": "0"}
@@ -499,13 +487,12 @@ async def handle_post(request):
         return web.json_response({"status": "error", "message": "WebSocket connection not established"}, status=500)
 
 async def send_message(message):
-    global websocket, last_bot_message_time
+    global websocket
     if websocket:
         # 处理换行符
         message = message.replace('\\n', '\n')
         chat_message = {"cmd": "chat", "text": message, "customId": "0"}
         await websocket.send(json.dumps(chat_message))
-        last_bot_message_time = time.time()  # 更新bot发送消息的时间
         return True
     return False
 
@@ -540,4 +527,4 @@ if __name__ == '__main__':
 
         asyncio.run(main())
     else:
-        print("Error: 'user.txt' file not found. Please ensure the file exists.")
+        print("错误：未找到 'user.txt' 文件。请确保该文件存在。")
