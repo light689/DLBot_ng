@@ -10,6 +10,7 @@ import urllib.parse
 import logging
 import sqlite3
 import sys
+import re
 
 # 初始化数据库
 def init_db():
@@ -214,16 +215,6 @@ async def join_channel(nick, password, channel, ws_link):
                     log_message("系统提示", f"已修改昵称为 {current_nick}")
             
 
-                if message.get("cmd") == "info" and message.get("type") == "whisper":
-                    trip = message.get("trip")
-                    if trip in trustedusers:
-                        text = message.get("text")
-                        if text and "whispered: $chat " in text:
-                            msg = text.split("whispered: $chat ", 1)[1]
-                            chat_message = {"cmd": "chat", "text": msg, "customId": "0"}
-                            await ws.send(json.dumps(chat_message))
-                            log_message("发送消息", json.dumps(chat_message))
-                
                 if message.get("channel") != true_channel and time.time() - initial_join_time > 10:
                     log_message("系统日志", "检测到被踢出，尝试重新加入...")
                     send_color_task.cancel()
@@ -232,7 +223,7 @@ async def join_channel(nick, password, channel, ws_link):
                     except asyncio.CancelledError:
                         pass
                     break
-                
+
                 if message.get("cmd") == "chat" and message.get("text", "").startswith("$chat "):
                     trip = message.get("trip")
                     if trip in trustedusers:
@@ -460,6 +451,56 @@ async def send_message(message):
         return True
     return False
 
+async def monitor_msg_log():
+    import re
+    import random
+    initial_line_count = 0
+    if os.path.exists("msg.log"):
+        with open("msg.log", "r", encoding="utf-8") as f:
+            initial_line_count = sum(1 for _ in f)
+    else:
+        initial_line_count = 0
+
+    current_line_count = initial_line_count
+
+    while True:
+        await asyncio.sleep(5)  # 每5秒检查一次
+        if os.path.exists("msg.log"):
+            with open("msg.log", "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                new_line_count = len(lines)
+                if new_line_count - current_line_count >= 50:
+                    current_line_count = new_line_count
+                    # 获取最近500行
+                    recent_lines = lines[-500:]
+                    # 查找最近的 "-----------------" 行
+                    for i in range(len(recent_lines)-1, -1, -1):
+                        if recent_lines[i].startswith('-----------------'):
+                            recent_lines = recent_lines[i+1:]
+                            break
+                    # 匹配格式
+                    pattern = re.compile(r'^\[([^\[\]]{6})\]([A-Za-z0-9_]{1,25}):\s*(.*)')
+                    matches = []
+                    for line in recent_lines:
+                        m = pattern.match(line.strip())
+                        if m:
+                            matches.append(line.strip())
+                    if matches:
+                        selected_line = random.choice(matches)
+                        # 去掉前面的 "[trip]username:"，前导一个空格
+                        parts = selected_line.split(":", 1)
+                        if len(parts) == 2:
+                            text = parts[1].lstrip()
+                            message_to_send = " " + text
+                            # 发送消息
+                            global websocket
+                            if websocket:
+                                chat_message = {"cmd": "chat", "text": message_to_send, "customId": "0"}
+                                await websocket.send(json.dumps(chat_message))
+                                log_message("发送消息", json.dumps(chat_message))
+        else:
+            current_line_count = 0
+
 if __name__ == '__main__':
     if os.path.exists("user.txt"):
         with open("user.txt", "r", encoding="utf-8") as user_file:
@@ -487,7 +528,8 @@ if __name__ == '__main__':
             init_db()
             server_task = asyncio.create_task(start_server())
             join_task = asyncio.create_task(join_channel(nick, password, channel, ws_link))
-            await join_task
+            monitor_task = asyncio.create_task(monitor_msg_log())
+            await asyncio.gather(join_task, monitor_task)
 
         asyncio.run(main())
     else:
