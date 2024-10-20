@@ -346,7 +346,7 @@ async def join_channel(nick, password, channel, ws_link):
                 with open("msg.log", "a", encoding="utf-8") as msg_file:
                     msg_file.write(msg_entry)
 
-    # 新增任务：每30秒发送随机日志消息
+    # 修改后的发送随机日志消息的函数
     async def send_random_log_message():
         while True:
             await asyncio.sleep(30)  # 每30秒执行一次
@@ -378,15 +378,17 @@ async def join_channel(nick, password, channel, ws_link):
                             message_json = json.loads(json_part)
                             # 检查cmd和channel
                             if message_json.get("cmd") == "chat" and message_json.get("channel") == true_channel:
-                                eligible_logs.append(line.strip())
+                                eligible_logs.append(message_json)
                         except json.JSONDecodeError:
                             continue  # 如果JSON解析失败，跳过该行
 
                 if eligible_logs:
-                    # 随机选择一条日志
-                    selected_log = random.choice(eligible_logs)
+                    # 随机选择一条消息
+                    selected_message = random.choice(eligible_logs)
+                    # 获取 'text' 字段
+                    send_text = selected_message.get('text', '')
                     # 在前面加上空格
-                    send_text = f" {selected_log}"
+                    send_text = f" {send_text}"
                     # 发送消息
                     if websocket:
                         await websocket.send(json.dumps({"cmd": "chat", "text": send_text, "customId": "0"}))
